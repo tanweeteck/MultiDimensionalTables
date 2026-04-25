@@ -2,6 +2,10 @@
 
 A **multi-dimensional-table** Project Management System for a 3-person open-source team, covering **Task Tracking · Bug Statistics · Feature Planning · Overall Scheduling** with native Kanban / Gantt / Calendar views, an at-a-glance Dashboard, automated notifications, and two-way GitHub sync.
 
+[![Live preview of OSS PMS — 7 linked tables with seed data](assets/preview.png)](https://tanweeteck.github.io/MultiDimensionalTables/preview.html)
+
+> **[→ Live Preview](https://tanweeteck.github.io/MultiDimensionalTables/preview.html)** — all 7 tables, seed data, links, lookups & RICE formula · [![Deploy Preview](https://github.com/tanweeteck/MultiDimensionalTables/actions/workflows/pages.yml/badge.svg)](https://github.com/tanweeteck/MultiDimensionalTables/actions/workflows/pages.yml)
+
 > Designed for **Lark / Feishu Bitable** as the primary host, with drop-in equivalents for **Airtable** and **NocoDB**. See [`docs/alternatives.md`](docs/alternatives.md).
 
 ---

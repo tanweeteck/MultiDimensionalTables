@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # needed to commit screenshot back to repo
   pages:    write
   id-token: write
 
@@ -26,13 +26,43 @@ jobs:
       - name: Generate preview.html from seed data
         run: python3 scripts/generate_preview.py
 
+      - name: Install Playwright (Chromium only)
+        run: |
+          npm install -g playwright@latest
+          npx playwright install --with-deps chromium
+
+      - name: Screenshot preview.html → assets/preview.png
+        run: |
+          mkdir -p assets
+          node - <<'JS'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch();
+            const page    = await browser.newPage();
+            await page.setViewportSize({ width: 1400, height: 900 });
+            await page.goto('file://' + process.cwd() + '/preview.html',
+                            { waitUntil: 'networkidle' });
+            await page.screenshot({ path: 'assets/preview.png', fullPage: false });
+            await browser.close();
+            console.log('Screenshot saved to assets/preview.png');
+          })();
+          JS
+
+      - name: Commit screenshot if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add assets/preview.png preview.html
+          git diff --cached --quiet || git commit -m "chore: update preview screenshot [skip ci]"
+          git push
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "."          # serve whole repo root; index is preview.html
+          path: "."
 
       - name: Deploy to GitHub Pages
         id: deploy
