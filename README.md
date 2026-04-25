@@ -31,7 +31,24 @@ Full matrix: [`docs/01-role-mapping.md`](docs/01-role-mapping.md).
 
 ---
 
-## Quickstart (≈30 minutes)
+## Quickstart
+
+Two paths — pick one:
+
+### A. Scripted (≈5 minutes, recommended)
+
+```bash
+export LARK_APP_ID=cli_xxx
+export LARK_APP_SECRET=xxx
+export LARK_BITABLE_APP_TOKEN=bascnxxx     # an empty Bitable base you own
+
+python3 scripts/build_base.py     # creates 7 tables, ~80 fields, 12 views
+python3 scripts/seed_base.py      # imports starter rows from seeds/
+```
+
+That gets you ~85% of the system. Finish the remaining UI-only pieces (rollups, dashboard, 12 automations) following [`docs/setup-guide.md`](docs/setup-guide.md) §3, §5, §7. Details and failure modes: [`scripts/README.md`](scripts/README.md).
+
+### B. Manual (≈30 minutes)
 
 1. Read [`docs/00-overview.md`](docs/00-overview.md) for the big picture.
 2. Follow [`docs/setup-guide.md`](docs/setup-guide.md) to build the base in Lark Bitable.
@@ -62,6 +79,10 @@ docs/
   github-sync.md                    Workflow YAML walkthrough, label routing, secrets
   setup-guide.md                    Step-by-step Lark Bitable build
   alternatives.md                   Airtable / NocoDB equivalents
+scripts/
+  build_base.py                     Create tables/fields/views via Open API
+  seed_base.py                      Import seeds/*.csv into the base
+  README.md                         Usage, env vars, idempotency notes
 seeds/
   members.csv  tasks.csv  bugs.csv  features.csv  milestones.csv
 .github/
