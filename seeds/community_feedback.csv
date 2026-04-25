@@ -1,0 +1,4 @@
+Summary,Source,Source URL,Reporter Handle,Type,Sentiment,Status
+"Docs for the new API are missing examples",GitHub Issue,,@user_gh_01,Bug Report,Negative,New
+"Would love a dark mode for the dashboard",GitHub Discussion,,@user_gh_02,Feature Request,Positive,Triaged
+"Installation worked perfectly on Ubuntu 24.04",Discord,,discord_user_03,Praise,Positive,Closed
