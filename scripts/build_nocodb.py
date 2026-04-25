@@ -2,21 +2,22 @@
 """
 Bootstrap the OSS PMS inside a local NocoDB instance.
 
+Tested against NocoDB 2026.04.x (v2 API).
+
 Run via:  make build
       or: python3 scripts/build_nocodb.py
 
 No external dependencies — pure Python stdlib.
 
-What this script does:
-  1. Waits for NocoDB to be healthy
-  2. Creates the admin user on first run (signs in on subsequent runs)
-  3. Creates the "OSS PMS" project (idempotent)
-  4. Pass 1  — creates 7 tables
-  5. Pass 2  — adds primitive fields (text, number, select, date, url, formula …)
-  6. Pass 3  — adds linked-record fields between tables
-  7. Pass 4  — adds lookup fields that depend on links
-  8. Pass 5  — creates Kanban / Grid / Gallery views per table
-  9. Pass 6  — bulk-inserts seed rows from seeds/*.csv, then wires links
+Passes:
+  1  Wait for NocoDB ready + auth
+  2  Create "OSS PMS" base inside the Default Workspace
+  3  Create 7 tables (primary column inline, no post-rename needed)
+  4  Add primitive columns per table
+  5  Add Links columns between tables
+  6  Add Lookup + Formula columns
+  7  Create views (grid, kanban)
+  8  Seed from seeds/*.csv, then wire link relations
 """
 
 from __future__ import annotations
@@ -30,52 +31,47 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-NOCODB_URL = os.environ.get("NOCODB_URL", "http://localhost:8080")
-ADMIN_EMAIL = os.environ.get("NOCODB_EMAIL", "admin@oss-pms.local")
-ADMIN_PASS = os.environ.get("NOCODB_PASSWORD", "Admin1234!")
+NOCODB_URL   = os.environ.get("NOCODB_URL",       "http://localhost:8080")
+ADMIN_EMAIL  = os.environ.get("NOCODB_EMAIL",     "admin@oss-pms.local")
+ADMIN_PASS   = os.environ.get("NOCODB_PASSWORD",  "Admin1234!")
 PROJECT_NAME = "OSS PMS"
-ROOT = Path(__file__).resolve().parents[1]
+ROOT  = Path(__file__).resolve().parents[1]
 SEEDS = ROOT / "seeds"
 
-# ---------------------------------------------------------------------------
-# NocoDB UI Types
-UI_TEXT = "SingleLineText"
-UI_LONG = "LongText"
-UI_NUM = "Number"
-UI_SELECT = "SingleSelect"
-UI_MULTI = "MultiSelect"
-UI_DATE = "Date"
-UI_CHECK = "Checkbox"
-UI_URL = "URL"
-UI_EMAIL = "Email"
-UI_LINK = "LinkToAnotherRecord"
-UI_LOOKUP = "Lookup"
+# ── UI types ──────────────────────────────────────────────────────────────────
+UI_TEXT    = "SingleLineText"
+UI_LONG    = "LongText"
+UI_NUM     = "Number"
+UI_SELECT  = "SingleSelect"
+UI_MULTI   = "MultiSelect"
+UI_DATE    = "Date"
+UI_CHECK   = "Checkbox"
+UI_URL     = "URL"
+UI_EMAIL   = "Email"
+UI_LINK    = "Links"           # modern UIType (replaces LinkToAnotherRecord)
+UI_LOOKUP  = "Lookup"
 UI_FORMULA = "Formula"
-UI_CREATED = "CreatedTime"
-UI_MODIFIED = "LastModifiedTime"
 
-# View types
-VT_GRID = 3
-VT_KANBAN = 4
-VT_GALLERY = 1
+# colours recycled round-robin for select options
+_COLOURS = [
+    "#cfdffe","#fee2e2","#dcfce7","#fef9c3","#f3e8ff",
+    "#ffedd5","#e0f2fe","#fce7f3","#d1fae5","#ede9fe",
+]
+def _colour(i: int) -> str:
+    return _COLOURS[i % len(_COLOURS)]
+
+def opts(*names: str) -> list[dict]:
+    return [{"title": n, "color": _colour(i)} for i, n in enumerate(names)]
 
 
-def sel(*opts: str) -> str:
-    """Format select options: "'opt1','opt2',..."."""
-    return ",".join(f"'{o}'" for o in opts)
-
-
-# ---------------------------------------------------------------------------
-# HTTP helpers
-# ---------------------------------------------------------------------------
+# ── HTTP helper ───────────────────────────────────────────────────────────────
 def http(method: str, path: str, token: str | None = None, data=None) -> dict:
     url = f"{NOCODB_URL}{path}"
     headers = {"Content-Type": "application/json"}
     if token:
         headers["xc-auth"] = token
     body = json.dumps(data).encode() if data is not None else None
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    req  = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read())
@@ -86,7 +82,7 @@ def http(method: str, path: str, token: str | None = None, data=None) -> dict:
 
 def wait_ready(max_tries: int = 40) -> None:
     print("Waiting for NocoDB…", end="", flush=True)
-    for i in range(max_tries):
+    for _ in range(max_tries):
         try:
             http("GET", "/api/v1/health")
             print(" ready.")
@@ -95,14 +91,14 @@ def wait_ready(max_tries: int = 40) -> None:
             print(".", end="", flush=True)
             time.sleep(3)
     print()
-    sys.exit("NocoDB did not become ready.  Is 'docker compose up -d' running?")
+    sys.exit("NocoDB not ready. Is 'docker compose up -d' running?")
 
 
 def login() -> str:
     try:
         r = http("POST", "/api/v1/auth/user/signup",
                  data={"email": ADMIN_EMAIL, "password": ADMIN_PASS})
-        print(f"  Admin user created ({ADMIN_EMAIL})")
+        print(f"  created admin  {ADMIN_EMAIL}")
         return r["token"]
     except RuntimeError as e:
         if "already" in str(e).lower() or "exist" in str(e).lower():
@@ -112,131 +108,59 @@ def login() -> str:
         raise
 
 
-# ---------------------------------------------------------------------------
-# Meta helpers
-# ---------------------------------------------------------------------------
-def get_or_create_project(token: str) -> str:
-    r = http("GET", "/api/v1/db/meta/projects/", token=token)
-    for p in r.get("list", []):
-        if p["title"] == PROJECT_NAME:
-            print(f"  ~ project  '{PROJECT_NAME}'  (exists)")
-            return p["id"]
-    r = http("POST", "/api/v1/db/meta/projects/",
-             token=token, data={"title": PROJECT_NAME})
-    pid = r["id"]
-    print(f"  + project  '{PROJECT_NAME}'  {pid}")
-    return pid
+# ── Schema ────────────────────────────────────────────────────────────────────
+# title_col  : the primary (row-title) column name
+# columns    : additional columns [(title, uidt, extra_kwargs)]
+#              For SingleSelect/MultiSelect: extra = {"colOptions": {"options": [...]}}
+#              For Number/Formula/etc: extra = {...} merged into the column body
 
-
-def list_tables(token: str, pid: str) -> dict[str, dict]:
-    r = http("GET", f"/api/v1/db/meta/projects/{pid}/tables", token=token)
-    return {t["title"]: t for t in r.get("list", [])}
-
-
-def get_or_create_table(token: str, pid: str, name: str,
-                         existing: dict[str, dict]) -> str:
-    if name in existing:
-        return existing[name]["id"]
-    r = http("POST", f"/api/v1/db/meta/projects/{pid}/tables",
-             token=token, data={"title": name})
-    tid = r["id"]
-    print(f"  + table  {name:26s}  {tid}")
-    time.sleep(0.3)
-    return tid
-
-
-def list_fields(token: str, tid: str) -> dict[str, dict]:
-    r = http("GET", f"/api/v1/db/meta/tables/{tid}/fields", token=token)
-    return {f["title"]: f for f in r.get("list", [])}
-
-
-def rename_field(token: str, fid: str, new_name: str) -> None:
-    http("PATCH", f"/api/v1/db/meta/fields/{fid}",
-         token=token, data={"title": new_name})
-
-
-def create_field(token: str, tid: str, title: str, uidt: str,
-                  extra: dict | None = None) -> str:
-    body: dict = {"title": title, "uidt": uidt}
-    if extra:
-        body.update(extra)
-    r = http("POST", f"/api/v1/db/meta/tables/{tid}/fields",
-             token=token, data=body)
-    fid = r.get("id", "")
-    time.sleep(0.15)
-    return fid
-
-
-def list_views(token: str, tid: str) -> dict[str, dict]:
-    r = http("GET", f"/api/v1/db/meta/tables/{tid}/views", token=token)
-    return {v["title"]: v for v in r.get("list", [])}
-
-
-def create_view(token: str, tid: str, title: str, vtype: int) -> None:
-    try:
-        http("POST", f"/api/v1/db/meta/tables/{tid}/views",
-             token=token, data={"title": title, "type": vtype})
-        time.sleep(0.15)
-    except RuntimeError as e:
-        print(f"      ! view '{title}' failed: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
-# Each table entry:
-#   "title_field" : the field to rename the auto-created 'Title' column to
-#   "fields"      : list of (name, uidt, extra_kwargs) for additional fields
 SCHEMA: dict[str, dict] = {
     "Members": {
-        "title_field": "Name",
-        "fields": [
-            ("Role", UI_SELECT, {"dtxp": sel("PD", "DCO", "UO")}),
-            ("Status", UI_SELECT, {"dtxp": sel("Active", "Away")}),
+        "title_col": "Name",
+        "columns": [
+            ("Role",   UI_SELECT, {"colOptions": {"options": opts("PD","DCO","UO")}}),
+            ("Status", UI_SELECT, {"colOptions": {"options": opts("Active","Away")}}),
             ("Lark Handle",    UI_TEXT, {}),
             ("Slack Handle",   UI_TEXT, {}),
             ("Discord Handle", UI_TEXT, {}),
             ("GitHub Handle",  UI_TEXT, {}),
             ("Email",          UI_EMAIL, {}),
-            ("Focus Areas", UI_MULTI, {"dtxp": sel(
-                "Frontend", "Backend", "Docs", "DevRel",
-                "Triage", "Support", "Community", "API")}),
+            ("Focus Areas", UI_MULTI, {"colOptions": {"options": opts(
+                "Frontend","Backend","Docs","DevRel",
+                "Triage","Support","Community","API")}}),
         ],
     },
     "Tasks": {
-        "title_field": "Title",
-        "fields": [
+        "title_col": "Title",
+        "columns": [
             ("Description", UI_LONG, {}),
-            ("Type", UI_SELECT, {"dtxp": sel(
-                "Feature", "Bug", "Doc", "DevOps", "Community", "Support")}),
-            ("Status", UI_SELECT, {"dtxp": sel(
-                "Backlog", "Planned", "In Progress", "Review", "Blocked", "Done")}),
-            ("Priority", UI_SELECT, {"dtxp": sel("P0", "P1", "P2", "P3")}),
+            ("Type",   UI_SELECT, {"colOptions": {"options": opts(
+                "Feature","Bug","Doc","DevOps","Community","Support")}}),
+            ("Status", UI_SELECT, {"colOptions": {"options": opts(
+                "Backlog","Planned","In Progress","Review","Blocked","Done")}}),
+            ("Priority", UI_SELECT, {"colOptions": {"options": opts("P0","P1","P2","P3")}}),
             ("Estimated Effort (d)", UI_NUM, {}),
             ("Actual Effort (d)",    UI_NUM, {}),
             ("Due Date",       UI_DATE, {}),
             ("Completed Date", UI_DATE, {}),
             ("GitHub Issue #", UI_NUM, {}),
             ("GitHub URL",     UI_URL, {}),
-            ("Tags", UI_MULTI, {"dtxp": sel(
-                "frontend", "backend", "docs", "good-first-issue")}),
-            ("Created",  UI_CREATED, {}),
-            ("Modified", UI_MODIFIED, {}),
+            ("Tags", UI_MULTI, {"colOptions": {"options": opts(
+                "frontend","backend","docs","good-first-issue")}}),
         ],
     },
     "Bugs": {
-        "title_field": "Title",
-        "fields": [
-            ("Severity", UI_SELECT, {"dtxp": sel(
-                "S0-Critical", "S1-High", "S2-Medium", "S3-Low")}),
-            ("Status", UI_SELECT, {"dtxp": sel(
-                "New", "Triaged", "In Progress", "Fixed",
-                "Verified", "Closed", "Won't Fix")}),
-            ("Repro Steps",     UI_LONG, {}),
-            ("Expected",        UI_LONG, {}),
-            ("Actual",          UI_LONG, {}),
-            ("Reproducibility", UI_SELECT, {"dtxp": sel(
-                "Always", "Sometimes", "Once")}),
+        "title_col": "Title",
+        "columns": [
+            ("Severity", UI_SELECT, {"colOptions": {"options": opts(
+                "S0-Critical","S1-High","S2-Medium","S3-Low")}}),
+            ("Status", UI_SELECT, {"colOptions": {"options": opts(
+                "New","Triaged","In Progress","Fixed","Verified","Closed","Won't Fix")}}),
+            ("Repro Steps",      UI_LONG, {}),
+            ("Expected",         UI_LONG, {}),
+            ("Actual",           UI_LONG, {}),
+            ("Reproducibility",  UI_SELECT, {"colOptions": {"options": opts(
+                "Always","Sometimes","Once")}}),
             ("Reporter (Free)",  UI_TEXT, {}),
             ("Affected Version", UI_TEXT, {}),
             ("Fixed Date",    UI_DATE, {}),
@@ -245,422 +169,429 @@ SCHEMA: dict[str, dict] = {
             ("Resolution", UI_LONG, {}),
             ("GitHub Issue #", UI_NUM, {}),
             ("GitHub URL",     UI_URL, {}),
-            ("Found",    UI_CREATED, {}),
-            ("Modified", UI_MODIFIED, {}),
         ],
     },
     "Features": {
-        "title_field": "Name",
-        "fields": [
+        "title_col": "Name",
+        "columns": [
             ("Problem Statement", UI_LONG, {}),
-            ("Status", UI_SELECT, {"dtxp": sel(
-                "Idea", "Discovery", "Planned", "In Dev",
-                "Beta", "Shipped", "Dropped")}),
-            ("Reach",           UI_NUM, {}),
-            ("Impact",          UI_NUM, {}),
-            ("Confidence (%)",  UI_NUM, {}),
-            ("Effort (d)",      UI_NUM, {}),
-            ("Acceptance Criteria", UI_LONG, {}),
-            ("GitHub Discussion URL", UI_URL, {}),
-            ("Created",  UI_CREATED, {}),
-            ("Modified", UI_MODIFIED, {}),
+            ("Status", UI_SELECT, {"colOptions": {"options": opts(
+                "Idea","Discovery","Planned","In Dev","Beta","Shipped","Dropped")}}),
+            ("Reach",          UI_NUM, {}),
+            ("Impact",         UI_NUM, {}),
+            ("Confidence (%)", UI_NUM, {}),
+            ("Effort (d)",     UI_NUM, {}),
+            ("Acceptance Criteria",   UI_LONG, {}),
+            ("GitHub Discussion URL", UI_URL,  {}),
         ],
     },
     "Milestones": {
-        "title_field": "Milestone",
-        "fields": [
+        "title_col": "Milestone",
+        "columns": [
             ("Goal",       UI_LONG, {}),
             ("Start Date", UI_DATE, {}),
             ("End Date",   UI_DATE, {}),
-            ("Status", UI_SELECT, {"dtxp": sel(
-                "Planning", "Active", "Released", "Postponed")}),
+            ("Status", UI_SELECT, {"colOptions": {"options": opts(
+                "Planning","Active","Released","Postponed")}}),
             ("Release Notes URL",  UI_URL, {}),
             ("GitHub Milestone #", UI_NUM, {}),
         ],
     },
     "Community Feedback": {
-        "title_field": "Summary",
-        "fields": [
-            ("Source", UI_SELECT, {"dtxp": sel(
-                "GitHub Issue", "GitHub Discussion",
-                "Discord", "X", "Email", "Survey", "Other")}),
-            ("Source URL",       UI_URL, {}),
-            ("Reporter Handle",  UI_TEXT, {}),
-            ("Type", UI_SELECT, {"dtxp": sel(
-                "Bug Report", "Feature Request", "Question", "Praise")}),
-            ("Sentiment", UI_SELECT, {"dtxp": sel(
-                "Positive", "Neutral", "Negative")}),
-            ("Status", UI_SELECT, {"dtxp": sel(
-                "New", "Triaged", "Converted", "Closed")}),
+        "title_col": "Summary",
+        "columns": [
+            ("Source", UI_SELECT, {"colOptions": {"options": opts(
+                "GitHub Issue","GitHub Discussion","Discord","X","Email","Survey","Other")}}),
+            ("Source URL",      UI_URL,  {}),
+            ("Reporter Handle", UI_TEXT, {}),
+            ("Type", UI_SELECT, {"colOptions": {"options": opts(
+                "Bug Report","Feature Request","Question","Praise")}}),
+            ("Sentiment", UI_SELECT, {"colOptions": {"options": opts(
+                "Positive","Neutral","Negative")}}),
+            ("Status", UI_SELECT, {"colOptions": {"options": opts(
+                "New","Triaged","Converted","Closed")}}),
             ("Closed Date", UI_DATE, {}),
-            ("Received",  UI_CREATED, {}),
-            ("Modified",  UI_MODIFIED, {}),
         ],
     },
     "Releases": {
-        "title_field": "Version",
-        "fields": [
-            ("Tag Date",           UI_DATE, {}),
-            ("Highlights",         UI_LONG, {}),
-            ("Breaking Changes",   UI_LONG, {}),
-            ("GitHub Release URL", UI_URL, {}),
+        "title_col": "Version",
+        "columns": [
+            ("Tag Date",           UI_DATE,  {}),
+            ("Highlights",         UI_LONG,  {}),
+            ("Breaking Changes",   UI_LONG,  {}),
+            ("GitHub Release URL", UI_URL,   {}),
             ("Announcement Posted", UI_CHECK, {}),
         ],
     },
 }
 
 # (source_table, field_name, target_table, link_type)
-# link_type: "mm" = many-to-many  |  "bt" = belongs-to (one-to-many from target side)
-# One entry per relationship pair — NocoDB auto-creates the reverse field.
+# One entry per pair — NocoDB auto-creates the reverse.
 LINKS: list[tuple[str, str, str, str]] = [
-    ("Tasks",              "Assignee",        "Members",            "mm"),
-    ("Tasks",              "Sprint",          "Milestones",         "mm"),
-    ("Tasks",              "Linked Feature",  "Features",           "mm"),
-    ("Tasks",              "Linked Bug",      "Bugs",               "mm"),
-    ("Bugs",               "Assignee",        "Members",            "mm"),
-    ("Bugs",               "Reporter (FB)",   "Community Feedback", "mm"),
-    ("Features",           "Owner",           "Members",            "mm"),
-    ("Features",           "Target Milestone","Milestones",         "mm"),
-    ("Milestones",         "Owner",           "Members",            "mm"),
-    ("Community Feedback", "Triaged By",      "Members",            "mm"),
-    ("Community Feedback", "Linked Feature",  "Features",           "mm"),
-    ("Releases",           "Linked Milestone","Milestones",         "mm"),
+    ("Tasks",              "Assignee",         "Members",            "mm"),
+    ("Tasks",              "Sprint",           "Milestones",         "mm"),
+    ("Tasks",              "Linked Feature",   "Features",           "mm"),
+    ("Tasks",              "Linked Bug",       "Bugs",               "mm"),
+    ("Bugs",               "Assignee",         "Members",            "mm"),
+    ("Bugs",               "Reporter (FB)",    "Community Feedback", "mm"),
+    ("Features",           "Owner",            "Members",            "mm"),
+    ("Features",           "Target Milestone", "Milestones",         "mm"),
+    ("Milestones",         "Owner",            "Members",            "mm"),
+    ("Community Feedback", "Triaged By",       "Members",            "mm"),
+    ("Community Feedback", "Linked Feature",   "Features",           "mm"),
+    ("Releases",           "Linked Milestone", "Milestones",         "mm"),
 ]
 
-# (table, field_name, link_field_on_same_table, field_to_look_up_in_linked_table)
+# (table, col_name, link_col_on_same_table, field_in_linked_table)
 LOOKUPS: list[tuple[str, str, str, str]] = [
-    ("Tasks", "Owner Area", "Assignee", "Role"),
-    ("Bugs",  "Owner Area", "Assignee", "Role"),
-    ("Features", "Owner Area", "Owner", "Role"),
+    ("Tasks",    "Owner Area", "Assignee", "Role"),
+    ("Bugs",     "Owner Area", "Assignee", "Role"),
+    ("Features", "Owner Area", "Owner",    "Role"),
 ]
 
-FORMULA_FIELDS: list[tuple[str, str, str]] = [
+FORMULA_COLS: list[tuple[str, str, str]] = [
     ("Features", "RICE Score",
      "({Reach} * {Impact} * ({Confidence (%)} / 100)) / {Effort (d)}"),
 ]
 
-# (table, view_name, view_type)
-VIEWS: list[tuple[str, str, int]] = [
-    ("Tasks",              "All Tasks",          VT_GRID),
-    ("Tasks",              "Kanban by Status",   VT_KANBAN),
-    ("Bugs",               "All Bugs",           VT_GRID),
-    ("Bugs",               "Open Bugs",          VT_KANBAN),
-    ("Features",           "All Features",       VT_GRID),
-    ("Features",           "Pipeline",           VT_KANBAN),
-    ("Milestones",         "Timeline",           VT_GRID),
-    ("Community Feedback", "Inbox",              VT_GRID),
-    ("Community Feedback", "By Type",            VT_KANBAN),
-    ("Releases",           "Shipped",            VT_GRID),
-    ("Members",            "Team",               VT_GRID),
+# (table, view_title, endpoint_suffix)
+VIEWS: list[tuple[str, str, str]] = [
+    ("Tasks",              "All Tasks",        "grids"),
+    ("Tasks",              "Kanban by Status", "kanbans"),
+    ("Bugs",               "All Bugs",         "grids"),
+    ("Bugs",               "Open Bugs",        "kanbans"),
+    ("Features",           "All Features",     "grids"),
+    ("Features",           "Pipeline",         "kanbans"),
+    ("Milestones",         "Timeline",         "grids"),
+    ("Community Feedback", "Inbox",            "grids"),
+    ("Community Feedback", "By Type",          "kanbans"),
+    ("Releases",           "Shipped",          "grids"),
+    ("Members",            "Team",             "grids"),
 ]
 
-# Seed files: (table_name, csv_file, primary_column_in_csv)
+# Seed config
 SEED_ORDER: list[tuple[str, str, str]] = [
-    ("Members",            "members.csv",  "Name"),
-    ("Milestones",         "milestones.csv", "Milestone"),
-    ("Features",           "features.csv", "Name"),
-    ("Tasks",              "tasks.csv",    "Title"),
-    ("Bugs",               "bugs.csv",     "Title"),
-    ("Community Feedback", "community_feedback.csv", "Summary"),
+    ("Members",            "members.csv",            "Name"),
+    ("Milestones",         "milestones.csv",          "Milestone"),
+    ("Features",           "features.csv",            "Name"),
+    ("Tasks",              "tasks.csv",               "Title"),
+    ("Bugs",               "bugs.csv",                "Title"),
+    ("Community Feedback", "community_feedback.csv",  "Summary"),
 ]
 
-# CSV columns that link to another table: {table: {csv_col: (linked_table, linked_col)}}
+# {table: {csv_col: (linked_table, linked_title_col)}}
 SEED_LINKS: dict[str, dict[str, tuple[str, str]]] = {
-    "Tasks": {
-        "Assignee":       ("Members",   "Name"),
-        "Sprint":         ("Milestones","Milestone"),
-        "Linked Feature": ("Features",  "Name"),
-    },
-    "Bugs": {
-        "Assignee": ("Members", "Name"),
-    },
-    "Features": {
-        "Owner":            ("Members",    "Name"),
-        "Target Milestone": ("Milestones", "Milestone"),
-    },
-    "Milestones": {
-        "Owner": ("Members", "Name"),
-    },
+    "Tasks":    {"Assignee":       ("Members",    "Name"),
+                 "Sprint":         ("Milestones", "Milestone"),
+                 "Linked Feature": ("Features",   "Name")},
+    "Bugs":     {"Assignee":       ("Members",    "Name")},
+    "Features": {"Owner":          ("Members",    "Name"),
+                 "Target Milestone": ("Milestones", "Milestone")},
+    "Milestones": {"Owner":        ("Members",    "Name")},
 }
 
-MULTI_SELECT_COLS: dict[str, set[str]] = {
+MULTI_COLS: dict[str, set[str]] = {
     "Members": {"Focus Areas"},
     "Tasks":   {"Tags"},
 }
 
 
-# ---------------------------------------------------------------------------
-# Data API helpers
-# ---------------------------------------------------------------------------
-def bulk_insert(token: str, pid: str, tid: str,
-                rows: list[dict]) -> list[dict]:
-    r = http("POST", f"/api/v1/db/data/noco/{pid}/{tid}/bulk",
-             token=token, data=rows)
-    return r if isinstance(r, list) else []
+# ── Meta helpers ──────────────────────────────────────────────────────────────
+def get_workspace_id(token: str) -> str:
+    r = http("GET", "/api/v1/workspaces", token=token)
+    return r["list"][0]["id"]
 
 
-def list_records(token: str, pid: str, tid: str) -> list[dict]:
+def get_or_create_base(token: str, ws: str) -> str:
+    r = http("GET",  f"/api/v2/meta/workspaces/{ws}/bases", token=token)
+    for b in r.get("list", []):
+        if b["title"] == PROJECT_NAME:
+            print(f"  ~ base  '{PROJECT_NAME}'  (exists)")
+            return b["id"]
+    r = http("POST", f"/api/v2/meta/workspaces/{ws}/bases",
+             token=token, data={"title": PROJECT_NAME})
+    print(f"  + base  '{PROJECT_NAME}'  {r['id']}")
+    return r["id"]
+
+
+def list_tables(token: str, base_id: str) -> dict[str, str]:
+    r = http("GET", f"/api/v2/meta/bases/{base_id}/tables", token=token)
+    return {t["title"]: t["id"] for t in r.get("list", [])}
+
+
+def create_table(token: str, base_id: str, title: str, title_col: str) -> str:
+    r = http("POST", f"/api/v2/meta/bases/{base_id}/tables", token=token, data={
+        "title":      title,
+        "table_name": title,
+        "columns":    [{"title": title_col, "uidt": UI_TEXT, "pv": True}],
+    })
+    print(f"  + table  {title}")
+    time.sleep(0.3)
+    return r["id"]
+
+
+def get_columns(token: str, tid: str) -> dict[str, dict]:
+    r = http("GET", f"/api/v2/meta/tables/{tid}", token=token)
+    return {c["title"]: c for c in r.get("columns", [])}
+
+
+def add_column(token: str, tid: str, title: str, uidt: str,
+               extra: dict | None = None) -> str:
+    body: dict = {"title": title, "uidt": uidt}
+    if extra:
+        body.update(extra)
+    r = http("POST", f"/api/v2/meta/tables/{tid}/columns", token=token, data=body)
+    # Response is the whole table; find column by title
+    for c in r.get("columns", []):
+        if c["title"] == title:
+            time.sleep(0.12)
+            return c["id"]
+    time.sleep(0.12)
+    return ""
+
+
+def get_views(token: str, tid: str) -> set[str]:
+    r = http("GET", f"/api/v2/meta/tables/{tid}/views", token=token)
+    return {v["title"] for v in r.get("list", [])}
+
+
+def create_view(token: str, tid: str, title: str, endpoint: str) -> None:
+    try:
+        http("POST", f"/api/v2/meta/tables/{tid}/{endpoint}",
+             token=token, data={"title": title})
+        time.sleep(0.15)
+    except RuntimeError as e:
+        print(f"    ! view '{title}': {e}")
+
+
+# ── Data helpers ──────────────────────────────────────────────────────────────
+def list_records(token: str, tid: str) -> list[dict]:
     out, page = [], 1
     while True:
-        r = http("GET",
-                 f"/api/v1/db/data/noco/{pid}/{tid}?limit=500&where=&page={page}",
+        r = http("GET", f"/api/v2/tables/{tid}/records?limit=500&page={page}",
                  token=token)
-        items = r.get("list", [])
-        out.extend(items)
-        if not r.get("pageInfo", {}).get("isLastPage", True):
-            page += 1
-        else:
+        out.extend(r.get("list", []))
+        if r.get("pageInfo", {}).get("isLastPage", True):
             break
+        page += 1
     return out
 
 
-def link_records(token: str, pid: str, tid: str, row_id: int,
-                  field_id: str, linked_ids: list[int]) -> None:
-    """Attach linked record IDs to a mm field on a row."""
-    body = [{"Id": lid} for lid in linked_ids]
+def insert_records(token: str, tid: str, rows: list[dict]) -> list[dict]:
+    if not rows:
+        return []
+    r = http("POST", f"/api/v2/tables/{tid}/records", token=token, data=rows)
+    return r if isinstance(r, list) else [r]
+
+
+def link_row(token: str, tid: str, col_id: str,
+             row_id: int, target_ids: list[int]) -> None:
+    body = [{"Id": i} for i in target_ids]
     http("POST",
-         f"/api/v1/db/data/noco/{pid}/{tid}/{row_id}/mm/{field_id}",
+         f"/api/v2/tables/{tid}/links/{col_id}/records/{row_id}",
          token=token, data=body)
 
 
-# ---------------------------------------------------------------------------
-# Build
-# ---------------------------------------------------------------------------
+# ── Build ─────────────────────────────────────────────────────────────────────
 def build() -> None:
     wait_ready()
 
     print("\n── Auth ──────────────────────────────────────────────")
     token = login()
 
-    print("\n── Project ───────────────────────────────────────────")
-    pid = get_or_create_project(token)
+    print("\n── Base ──────────────────────────────────────────────")
+    ws    = get_workspace_id(token)
+    bid   = get_or_create_base(token, ws)
 
     # ── Pass 1: tables ────────────────────────────────────────────────────
     print("\n── Pass 1: tables ────────────────────────────────────")
-    existing_tables = list_tables(token, pid)
-    table_ids: dict[str, str] = {}
-    for tname in SCHEMA:
-        table_ids[tname] = get_or_create_table(token, pid, tname, existing_tables)
-        if tname in existing_tables:
-            print(f"  ~ table  {tname}")
-
-    # ── Pass 2: primitive fields ───────────────────────────────────────────
-    print("\n── Pass 2: primitive fields ──────────────────────────")
-    field_maps: dict[str, dict[str, dict]] = {}
+    existing = list_tables(token, bid)
+    tids: dict[str, str] = {}
     for tname, cfg in SCHEMA.items():
-        tid = table_ids[tname]
-        fm = list_fields(token, tid)
+        if tname in existing:
+            tids[tname] = existing[tname]
+            print(f"  ~ table  {tname}")
+        else:
+            tids[tname] = create_table(token, bid, tname, cfg["title_col"])
 
-        # Rename the auto-created 'Title' field if needed
-        title_target = cfg["title_field"]
-        if "Title" in fm and title_target not in fm:
-            rename_field(token, fm["Title"]["id"], title_target)
-            fm[title_target] = {**fm.pop("Title"), "title": title_target}
-            print(f"  ~ {tname}.Title → {title_target}")
-
-        # Create additional fields
-        for fname, uidt, extra in cfg["fields"]:
-            if fname in fm:
+    # ── Pass 2: primitive columns ─────────────────────────────────────────
+    print("\n── Pass 2: primitive columns ─────────────────────────")
+    col_maps: dict[str, dict[str, dict]] = {}
+    for tname, cfg in SCHEMA.items():
+        cm = get_columns(token, tids[tname])
+        for title, uidt, extra in cfg["columns"]:
+            if title in cm:
                 continue
-            fid = create_field(token, tid, fname, uidt, extra or None)
-            fm[fname] = {"id": fid, "title": fname, "uidt": uidt}
-            print(f"  + {tname}.{fname}  ({uidt})")
+            fid = add_column(token, tids[tname], title, uidt, extra or None)
+            cm[title] = {"id": fid, "title": title, "uidt": uidt}
+            print(f"  + {tname}.{title}")
+        col_maps[tname] = get_columns(token, tids[tname])   # refresh
 
-        field_maps[tname] = list_fields(token, tid)  # refresh
-
-    # ── Pass 3: linked-record fields ──────────────────────────────────────
-    print("\n── Pass 3: link fields ───────────────────────────────")
+    # ── Pass 3: link columns ──────────────────────────────────────────────
+    print("\n── Pass 3: link columns ──────────────────────────────")
     for src, fname, tgt, ltype in LINKS:
-        fm = field_maps[src]
-        if fname in fm:
+        cm = col_maps[src]
+        if fname in cm:
             continue
         try:
-            fid = create_field(token, table_ids[src], fname, UI_LINK, {
-                "colOptions": {
-                    "type": ltype,
-                    "parentId": table_ids[src],
-                    "childId": table_ids[tgt],
-                },
+            add_column(token, tids[src], fname, UI_LINK, {
+                "type":     ltype,
+                "parentId": tids[src],
+                "childId":  tids[tgt],
             })
-            print(f"  + {src}.{fname} → {tgt}  ({ltype})")
+            print(f"  + {src}.{fname} → {tgt}")
         except RuntimeError as e:
-            print(f"  ! {src}.{fname} → {tgt}  FAILED: {e}")
+            print(f"  ! {src}.{fname}: {e}")
 
-    # Refresh field maps so lookup pass has link field IDs
+    # Refresh so lookup pass has link column IDs
     for tname in SCHEMA:
-        field_maps[tname] = list_fields(token, table_ids[tname])
+        col_maps[tname] = get_columns(token, tids[tname])
 
-    # ── Pass 4: lookup + formula fields ───────────────────────────────────
+    # ── Pass 4: lookup + formula columns ─────────────────────────────────
     print("\n── Pass 4: lookup + formula ──────────────────────────")
-    for tname, fname, link_field, target_field in LOOKUPS:
-        if fname in field_maps[tname]:
+    for tname, fname, link_col, target_col in LOOKUPS:
+        if fname in col_maps[tname]:
             continue
-        link_fid = field_maps[tname].get(link_field, {}).get("id")
-        if not link_fid:
-            print(f"  ! {tname}.{fname}  missing link field '{link_field}'")
+        link_cid = col_maps[tname].get(link_col, {}).get("id")
+        if not link_cid:
+            print(f"  ! {tname}.{fname}: link col '{link_col}' missing")
             continue
         tgt_tname = next(
-            (t for _, lf, t, _ in LINKS if _ == tname and lf == link_field),
-            None,
+            (t for s, f, t, _ in LINKS if s == tname and f == link_col), None
         )
-        if not tgt_tname:
-            # search without position binding
-            tgt_tname = next(
-                (t for s, lf, t, _ in LINKS if s == tname and lf == link_field),
-                None,
-            )
-        if not tgt_tname:
-            print(f"  ! {tname}.{fname}  cannot resolve target table")
-            continue
-        tgt_fid = field_maps.get(tgt_tname, {}).get(target_field, {}).get("id")
-        if not tgt_fid:
-            print(f"  ! {tname}.{fname}  target field {tgt_tname}.{target_field} missing")
+        tgt_cid = col_maps.get(tgt_tname or "", {}).get(target_col, {}).get("id")
+        if not tgt_cid:
+            print(f"  ! {tname}.{fname}: target col '{target_col}' missing")
             continue
         try:
-            create_field(token, table_ids[tname], fname, UI_LOOKUP, {
-                "colOptions": {
-                    "fk_relation_column_id": link_fid,
-                    "fk_lookup_column_id": tgt_fid,
-                },
+            add_column(token, tids[tname], fname, UI_LOOKUP, {
+                "fk_relation_column_id": link_cid,
+                "fk_lookup_column_id":   tgt_cid,
             })
-            print(f"  + {tname}.{fname}  (lookup of {tgt_tname}.{target_field})")
+            print(f"  + {tname}.{fname}  (lookup → {tgt_tname}.{target_col})")
         except RuntimeError as e:
-            print(f"  ! {tname}.{fname}  FAILED: {e}")
+            print(f"  ! {tname}.{fname}: {e}")
 
-    for tname, fname, expr in FORMULA_FIELDS:
-        if fname in field_maps[tname]:
+    for tname, fname, expr in FORMULA_COLS:
+        if fname in col_maps[tname]:
             continue
         try:
-            create_field(token, table_ids[tname], fname, UI_FORMULA, {
-                "colOptions": {"formula_raw": expr},
-            })
+            add_column(token, tids[tname], fname, UI_FORMULA,
+                       {"formula_raw": expr})
             print(f"  + {tname}.{fname}  (formula)")
         except RuntimeError as e:
-            print(f"  ! {tname}.{fname}  FAILED: {e}")
+            print(f"  ! {tname}.{fname}: {e}")
 
     # ── Pass 5: views ─────────────────────────────────────────────────────
     print("\n── Pass 5: views ─────────────────────────────────────")
-    for tname, vname, vtype in VIEWS:
-        existing = list_views(token, table_ids[tname])
-        if vname in existing:
-            print(f"  ~ {tname}.{vname}")
+    for tname, vname, ep in VIEWS:
+        existing_v = get_views(token, tids[tname])
+        if vname in existing_v:
+            print(f"  ~ {tname} / {vname}")
             continue
-        create_view(token, table_ids[tname], vname, vtype)
-        print(f"  + {tname}.{vname}")
+        create_view(token, tids[tname], vname, ep)
+        print(f"  + {tname} / {vname}")
+
+    # Refresh col maps for seed pass
+    for tname in SCHEMA:
+        col_maps[tname] = get_columns(token, tids[tname])
 
     # ── Pass 6: seed data ─────────────────────────────────────────────────
     print("\n── Pass 6: seed data ─────────────────────────────────")
-    # Maps  table_name → {display_value → row_id}  for link resolution
-    record_index: dict[str, dict[str, int]] = {}
+    record_index: dict[str, dict[str, int]] = {}   # table → title → Id
 
-    for tname, csv_name, dedup_col in SEED_ORDER:
+    for tname, csv_name, title_col in SEED_ORDER:
         path = SEEDS / csv_name
         if not path.exists():
-            print(f"  ~ {tname}: {csv_name} not found, skipping")
+            print(f"  ~ {tname}: {csv_name} not found")
             continue
 
-        tid = table_ids[tname]
-        existing = list_records(token, pid, tid)
-        existing_keys = {
-            str(r.get("fields", r).get(dedup_col, r.get(dedup_col, ""))).strip()
-            for r in existing
-        }
-        # Build the record index from rows already in NocoDB
+        tid       = tids[tname]
+        link_spec = SEED_LINKS.get(tname, {})
+        multi_c   = MULTI_COLS.get(tname, set())
+
+        # Build index from rows already in NocoDB
+        existing_rows = list_records(token, tid)
         record_index.setdefault(tname, {})
-        for r in existing:
-            fields = r.get("fields", r)
-            key = str(fields.get(dedup_col, r.get(dedup_col, ""))).strip()
-            row_id = r.get("Id") or r.get("id")
-            if key and row_id:
-                record_index[tname][key] = int(row_id)
+        existing_keys: set[str] = set()
+        for r in existing_rows:
+            key = str(r.get(title_col, "")).strip()
+            if key:
+                existing_keys.add(key)
+                record_index[tname][key] = int(r["Id"])
 
         with path.open(newline="", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
+            csv_rows = list(csv.DictReader(f))
 
-        # Separate primitive values from link values
-        link_spec = SEED_LINKS.get(tname, {})
-        multi_cols = MULTI_SELECT_COLS.get(tname, set())
+        to_insert   = []
+        pending_links: list[tuple[str, dict[str, list[str]]]] = []
 
-        primitive_rows: list[dict] = []
-        link_rows: list[dict] = []   # parallel: {col: [display_values]}
-
-        for row in rows:
-            key = row.get(dedup_col, "").strip()
+        for row in csv_rows:
+            key = row.get(title_col, "").strip()
             if not key or key in existing_keys:
                 continue
-            prim: dict = {}
-            links: dict = {}
+            prim: dict  = {}
+            llinks: dict = {}
             for col, raw in row.items():
-                raw = raw.strip()
+                raw = (raw or "").strip()
                 if not raw:
                     continue
                 if col in link_spec:
-                    links[col] = [v.strip() for v in raw.split(";") if v.strip()]
-                elif col in multi_cols:
-                    prim[col] = raw  # NocoDB accepts comma-separated string for MultiSelect
+                    llinks[col] = [v.strip() for v in raw.split(";") if v.strip()]
+                elif col in multi_c:
+                    prim[col] = raw      # NocoDB accepts "a,b,c" for MultiSelect
                 else:
                     prim[col] = raw
-            primitive_rows.append(prim)
-            link_rows.append(links)
+            to_insert.append(prim)
+            pending_links.append((key, llinks))
 
-        if not primitive_rows:
-            print(f"  ~ {tname}: nothing new to insert")
+        if not to_insert:
+            print(f"  ~ {tname}: nothing new")
             continue
 
-        inserted = bulk_insert(token, pid, tid, primitive_rows)
-        print(f"  + {tname}: inserted {len(inserted)} rows")
+        inserted = insert_records(token, tid, to_insert)
+        print(f"  + {tname}: {len(inserted)} rows")
 
-        # Build record index from newly inserted rows for downstream link resolution
-        for rec in inserted:
-            fields = rec.get("fields", rec)
-            key = str(fields.get(dedup_col, rec.get(dedup_col, ""))).strip()
-            row_id = rec.get("Id") or rec.get("id")
-            if key and row_id:
-                record_index[tname][key] = int(row_id)
+        # Re-fetch to get stable Ids
+        all_rows = list_records(token, tid)
+        for r in all_rows:
+            key = str(r.get(title_col, "")).strip()
+            if key:
+                record_index[tname][key] = int(r["Id"])
 
-        # Wire links for newly inserted rows
-        # Re-fetch to get stable IDs after bulk insert
-        refreshed = {
-            str(r.get("fields", r).get(dedup_col, r.get(dedup_col, ""))).strip(): r
-            for r in list_records(token, pid, tid)
-        }
-        fm = list_fields(token, tid)
-
-        for prim, links in zip(primitive_rows, link_rows):
-            key = str(prim.get(dedup_col, "")).strip()
-            rec = refreshed.get(key)
-            if not rec or not links:
+        # Wire links
+        cm = col_maps[tname]
+        for key, llinks in pending_links:
+            src_id = record_index[tname].get(key)
+            if not src_id or not llinks:
                 continue
-            row_id = rec.get("Id") or rec.get("id")
-            if not row_id:
-                continue
-            for col, display_values in links.items():
-                fid = fm.get(col, {}).get("id")
-                if not fid:
-                    print(f"      ! link field '{col}' not found on {tname}")
+            for col, display_vals in llinks.items():
+                col_meta = cm.get(col, {})
+                col_id   = col_meta.get("id")
+                if not col_id:
                     continue
-                tgt_tname, tgt_col = link_spec[col]
-                linked_ids = [
+                tgt_tname, _ = link_spec[col]
+                tgt_ids = [
                     record_index.get(tgt_tname, {}).get(v)
-                    for v in display_values
+                    for v in display_vals
                 ]
-                linked_ids = [i for i in linked_ids if i]
-                if linked_ids:
+                tgt_ids = [i for i in tgt_ids if i]
+                if tgt_ids:
                     try:
-                        link_records(token, pid, tid, row_id, fid, linked_ids)
+                        link_row(token, tid, col_id, src_id, tgt_ids)
                     except RuntimeError as e:
-                        print(f"      ! link {tname}#{row_id}.{col}: {e}")
+                        print(f"    ! {tname}#{src_id}.{col}: {e}")
 
     print(f"""
 ── Done ──────────────────────────────────────────────
-  NocoDB UI   →  {NOCODB_URL}
-  Email       →  {ADMIN_EMAIL}
-  Password    →  {ADMIN_PASS}
+  Open  →  {NOCODB_URL}
+  Email →  {ADMIN_EMAIL}
+  Pass  →  {ADMIN_PASS}
 
-Manual follow-ups (not available via API):
-  • Rollup fields  (Tasks Total / Done / Progress %)     → add in UI per docs/schema/04-features.md
-  • Dashboard      (charts, KPIs)                        → docs/dashboard.md
-  • Automations    (12 webhook/notification rules)       → docs/automations.md
+Still manual (API doesn't support):
+  • Rollup fields (Tasks Total / Done / Progress %)  → UI per docs/schema/
+  • Dashboard charts / KPIs                          → docs/dashboard.md
+  • Automations A1–A12                               → docs/automations.md
 """)
 
 
