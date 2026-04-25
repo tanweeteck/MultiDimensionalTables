@@ -1,0 +1,4 @@
+Title,Severity,Status,Reproducibility,Reporter (Free),Assignee,Affected Version,Repro Steps,Expected,Actual,GitHub Issue #
+Login loop after OIDC redirect,S0-Critical,Triaged,Always,carmendiaz,Alice Chen,v0.3.0,"1. Click Login 2. Auth on IdP 3. Redirect back","User reaches dashboard","Endless redirect loop, browser tab freezes",61
+Pagination misses last page,S2-Medium,In Progress,Sometimes,user42,Alice Chen,v0.3.0,"1. Have >100 records 2. Page through to end","Last page shows correctly","Last page is empty even though records exist",58
+Typo in error message,S3-Low,New,Always,baoliu,Bao Liu,v0.3.0,"Trigger any 500 error","Spelled correctly","'Internal Sever Error'",62

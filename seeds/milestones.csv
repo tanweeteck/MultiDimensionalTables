@@ -1,0 +1,4 @@
+Milestone,Goal,Start Date,End Date,Status,Owner,GitHub Milestone #
+v0.3.0 — Initial Public Release,"First public release: core API stable, docs published, install path proven",2026-04-01,2026-04-30,Released,Alice Chen,1
+v0.4.0 — Q2 GA,"General availability: SSO, multi-tenant, observability hooks",2026-05-01,2026-06-30,Active,Alice Chen,2
+v0.5.0 — Q3 Plugins,"Plugin SDK + first 3 community plugins",2026-07-01,2026-09-15,Planning,Alice Chen,3

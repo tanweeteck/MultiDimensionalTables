@@ -1,0 +1,140 @@
+name: Sync GitHub Issues to Bitable
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled, assigned, unassigned]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync issue to Bitable
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_BITABLE_APP_TOKEN: ${{ secrets.LARK_BITABLE_APP_TOKEN }}
+          LARK_TASKS_TABLE_ID: ${{ secrets.LARK_TASKS_TABLE_ID }}
+          LARK_BUGS_TABLE_ID: ${{ secrets.LARK_BUGS_TABLE_ID }}
+          LARK_FEATURES_TABLE_ID: ${{ secrets.LARK_FEATURES_TABLE_ID }}
+          LARK_FEEDBACK_TABLE_ID: ${{ secrets.LARK_FEEDBACK_TABLE_ID }}
+          LARK_MEMBERS_TABLE_ID: ${{ secrets.LARK_MEMBERS_TABLE_ID }}
+          ISSUE_PAYLOAD: ${{ toJson(github.event.issue) }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.parse
+
+          BASE = "https://open.larksuite.com/open-apis"  # use https://open.feishu.cn for China region
+
+          def http(method, url, data=None, token=None):
+              headers = {"Content-Type": "application/json; charset=utf-8"}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+              body = json.dumps(data).encode() if data is not None else None
+              req = urllib.request.Request(url, data=body, headers=headers, method=method)
+              with urllib.request.urlopen(req) as r:
+                  return json.loads(r.read())
+
+          def auth():
+              r = http("POST", f"{BASE}/auth/v3/tenant_access_token/internal",
+                       {"app_id": os.environ["LARK_APP_ID"],
+                        "app_secret": os.environ["LARK_APP_SECRET"]})
+              return r["tenant_access_token"]
+
+          def route_table(labels):
+              names = {l["name"].lower() for l in labels}
+              if "bug" in names: return os.environ["LARK_BUGS_TABLE_ID"], "bug"
+              if names & {"enhancement", "feature"}: return os.environ["LARK_FEATURES_TABLE_ID"], "feature"
+              if names & {"community", "question", "support"}: return os.environ["LARK_FEEDBACK_TABLE_ID"], "feedback"
+              return os.environ["LARK_TASKS_TABLE_ID"], "task"
+
+          def severity_from_labels(labels):
+              for l in labels:
+                  n = l["name"].lower()
+                  if n.startswith("severity:"):
+                      v = n.split(":", 1)[1].upper()
+                      return {"S0":"S0-Critical","S1":"S1-High","S2":"S2-Medium","S3":"S3-Low"}.get(v, "S2-Medium")
+              return "S2-Medium"
+
+          def find_member_record(token, github_handle):
+              if not github_handle: return None
+              app = os.environ["LARK_BITABLE_APP_TOKEN"]
+              tid = os.environ["LARK_MEMBERS_TABLE_ID"]
+              url = f"{BASE}/bitable/v1/apps/{app}/tables/{tid}/records/search"
+              r = http("POST", url, {"filter": {"conjunction": "and",
+                       "conditions": [{"field_name": "GitHub Handle", "operator": "is",
+                                       "value": [github_handle]}]}}, token)
+              items = r.get("data", {}).get("items", [])
+              return items[0]["record_id"] if items else None
+
+          def upsert(token, table_id, issue_number, fields):
+              app = os.environ["LARK_BITABLE_APP_TOKEN"]
+              search = http("POST",
+                  f"{BASE}/bitable/v1/apps/{app}/tables/{table_id}/records/search",
+                  {"filter": {"conjunction": "and",
+                              "conditions": [{"field_name": "GitHub Issue #",
+                                              "operator": "is",
+                                              "value": [str(issue_number)]}]}}, token)
+              items = search.get("data", {}).get("items", [])
+              if items:
+                  rid = items[0]["record_id"]
+                  http("PUT",
+                       f"{BASE}/bitable/v1/apps/{app}/tables/{table_id}/records/{rid}",
+                       {"fields": fields}, token)
+                  return rid
+              created = http("POST",
+                  f"{BASE}/bitable/v1/apps/{app}/tables/{table_id}/records",
+                  {"fields": fields}, token)
+              return created["data"]["record"]["record_id"]
+
+          def main():
+              issue = json.loads(os.environ["ISSUE_PAYLOAD"])
+              action = os.environ["ACTION"]
+              token = auth()
+              table_id, kind = route_table(issue.get("labels", []))
+
+              assignee_login = (issue.get("assignee") or {}).get("login")
+              assignee_rid = find_member_record(token, assignee_login)
+
+              fields = {
+                  "Title": issue["title"],
+                  "Description": issue.get("body") or "",
+                  "GitHub Issue #": issue["number"],
+                  "GitHub URL": issue["html_url"],
+                  "Tags": [l["name"] for l in issue.get("labels", [])
+                           if not l["name"].lower().startswith("severity:")],
+              }
+              if assignee_rid:
+                  fields["Assignee"] = [assignee_rid]
+
+              if kind == "bug":
+                  fields["Severity"] = severity_from_labels(issue.get("labels", []))
+                  if action == "opened":
+                      fields["Status"] = "New"
+                  if issue["state"] == "closed":
+                      fields["Status"] = "Closed"
+              elif kind == "feature":
+                  if action == "opened": fields["Status"] = "Idea"
+              elif kind == "feedback":
+                  fields["Source"] = "GitHub Issue"
+                  fields["Source URL"] = issue["html_url"]
+                  fields["Type"] = "Question"
+                  if action == "opened": fields["Status"] = "New"
+              else:  # task
+                  if action == "opened":
+                      fields["Status"] = "Backlog"
+                      fields["Type"] = "Feature"
+                  if issue["state"] == "closed":
+                      fields["Status"] = "Done"
+
+              rid = upsert(token, table_id, issue["number"], fields)
+              print(f"Upserted {kind} record {rid} for issue #{issue['number']}")
+
+          main()
+          PY

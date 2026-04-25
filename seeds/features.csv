@@ -1,0 +1,4 @@
+Name,Problem Statement,Owner,Status,Reach,Impact,Confidence (%),Effort (d),Target Milestone,Acceptance Criteria,GitHub Discussion URL
+SSO via OIDC,"Enterprise users can't onboard without SSO",Alice Chen,In Dev,500,2,80,8,v0.4.0 — Q2 GA,"OIDC login flow works for Google + Okta; refresh tokens; admin can disable",https://github.com/tanweeteck/multidimensionaltables/discussions/12
+Plugin SDK,"Community wants to extend us without forking",Alice Chen,Discovery,2000,3,60,20,v0.5.0 — Q3 Plugins,"Public SDK doc; sample plugin; load/unload at runtime",https://github.com/tanweeteck/multidimensionaltables/discussions/14
+Improved Quickstart,"New users drop off in first 10 minutes",Bao Liu,Planned,1500,2,90,3,v0.4.0 — Q2 GA,"<5 min from clone to running demo; copy-paste-able commands",https://github.com/tanweeteck/multidimensionaltables/discussions/9

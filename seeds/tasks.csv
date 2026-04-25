@@ -1,0 +1,6 @@
+Title,Type,Status,Priority,Assignee,Sprint,Linked Feature,Estimated Effort (d),Due Date,GitHub Issue #
+Wire OIDC discovery endpoint,Feature,In Progress,P1,Alice Chen,v0.4.0 — Q2 GA,SSO via OIDC,2,2026-05-08,42
+Write OIDC admin docs,Doc,Backlog,P2,Bao Liu,v0.4.0 — Q2 GA,SSO via OIDC,1,2026-05-15,43
+Rewrite README quickstart,Doc,In Progress,P1,Bao Liu,v0.4.0 — Q2 GA,Improved Quickstart,1,2026-05-05,38
+Triage incoming Discord questions,Community,In Progress,P2,Carmen Diaz,v0.4.0 — Q2 GA,,1,2026-05-01,
+Investigate plugin lifecycle hooks,Feature,Planned,P2,Alice Chen,v0.5.0 — Q3 Plugins,Plugin SDK,3,2026-07-10,55
